@@ -85,11 +85,27 @@ wb = openpyxl.Workbook()
 
 | 字段 | 规则 |
 |------|------|
-| 姓名 | 中国船员=中文；外国船员=大写英文 |
+| 姓名 | **中国船员=中文姓名**（列3，非列2！列2是英文名）；**自动去除姓名内所有空格**（如 `刘 斌` → `刘斌`）；外国船员=大写英文 |
 | 船员职务 | 英文缩写自动映射（见 `references/conversion-rules.md`） |
-| 国籍 | `CN-中国` / `VN-越南` 格式 |
-| 出生日期 | `YYYYMMDD` 格式 |
-| 证件类型 | 中国=`17-海员证`，外国=`14-普通护照` |
+| 国籍 | `CN-中国`（所有中国船员固定）|
+| 出生地点 | **统一填写「中国」** |
+| 证件类型 | 中国=`17-海员证`（不用护照） |
+| 证件号码 | **优先取海员证号码**（列8），列8为空时取护照号（列10）|
+| 出生日期 | `YYYYMMDD` 格式，xlrd 用 `xlrd.xldate_as_datetime(serial, wb.datemode)` |
+
+**职务代码映射（高级船员保留原级）：**
+```
+51-船长 / 52-大副 / 53-二副 / 54-三副
+61-轮机长 / 62-大管轮 / 63-二管轮 / 64-三管轮
+```
+**非高级船员（13人）：均分进甲板部和轮机部**
+- 甲板部 → `56-高级值班水手`（7人）：WIPER, BSN, CARP, D/CDT, FTR, AB(1人), OLR(1人)
+- 轮机部 → `66-高级值班机工`（6人）：AB(2人), OLR(2人), E/CDT, C/CK
+
+**登船口岸代码：**
+- `ZHOUSHAN` → `CNZOS`（舟山）
+- `LANSHAN` → `CNLSN`（岚山，注意不是 CNLSH）
+- 原始文件格式：`ZHOUSHAN,CHINA` 或 `LANSHAN,CHINA`
 
 ### 物品清单
 
@@ -98,16 +114,49 @@ wb = openpyxl.Workbook()
 | 列 | 字段 | 值 |
 |----|------|-----|
 | 1 | 序号 | 船员序号 |
-| 2 | 证件类型 | `17-海员证`（中国）或 `14-普通护照`（外国） |
-| 3 | 证件号码 | 海员证号或护照号 |
+| 2 | 证件类型 | `17`（海员证代码，非文字） |
+| 3 | 证件号码 | 海员证号 |
 | 4 | 物品类型 | `0100` |
 | 5 | 物品名称 | `计算机` |
 | 6 | 物品数量 | `1` |
 | 7 | 数量单位 | `001` |
 
----
+### 港口活动时间规则（重要！）
 
-## Feishu 文件发送
+- **进港时间**：随机 00:00 ~ 12:00（`random.randint(0,11)`）
+- **离港时间**：随机 12:00 ~ 24:00（`random.randint(12,23)`）
+- **固定种子**：`random.seed(航次号)` 确保同一文件内时间可复现
+- **格式**：`YYYY/MM/DD HH:MM:SS`（如 `2026/04/09 11:00:56`）
+
+### NA 端口处理
+
+原始文件中 UNLOCODE 为 `NA`（Not Assigned）的港口：
+1. 根据港口名在 `port_map.json` 或网上查找正确 UNLOCODE
+2. 将修正后的代码填入 `停靠港口` 列
+3. **整行标红**（红色字体 `Font(color="FF0000")` + 浅红底色 `PatternFill`）
+4. 不删除该行，仍按正常记录录入
+
+### IMO Crew List (.xls) 解析要点
+
+```python
+import xlrd
+
+# ❌ openpyxl 不支持 .xls 格式
+# ✅ 用 xlrd
+wb = xlrd.open_workbook(path, formatting_info=False)
+ws = wb.sheet_by_name('CREW LIST')  # Sheet 名是 'CREW LIST'
+
+# 列索引（0-based）：
+# 0=''(空), 1=seq, 2=EN_name, 3=CN_name(中文名), 4=rank, 5=nation,
+# 6=DOB_xlserial, 7=place, 8=seaman_no, 9=seaman_exp_str('DD/MM/YYYY'),
+# 10=passport_no, 11=passport_exp_xl, 12=join_date_xl, 13=join_place
+
+# Excel日期转换（重要！不能用 openpyxl 的方式）：
+dt = xlrd.xldate_as_datetime(serial, wb.datemode)
+dob_str = dt.strftime('%Y%m%d')
+```
+
+### Feishu 文件发送
 
 不要用 `send_message_tool`（非 Telegram 平台会丢弃附件）。正确方式：
 
@@ -165,8 +214,28 @@ requests.post(
 **操作**: 读取 input/ 目录最新文件 → 检测 .xls 或 .xlsx → 执行转换 → 返回结果
 
 ---
+## PDF 端口解析（v3.1+）
+
+**解析引擎**：pdfplumber（不用 pdftotext，表格结构更可靠）
+
+**token 结构**（`tokenize_dates_block()`）：
+- `token[0]` = 港口名称
+- `token[1]` = 序号（字符串，格式如 `"1."`）
+- `token[2+]` = 日期文本（可能有多个 token 拼接，如 `'06-MAR-2026'`）
+
+**日期提取**（`extract_dates_from_block()`）：
+1. 扫描标准月份英文名（ JAN FEB MAR APR MAY JUN JUL AUG SEP OCT NOV DEC）
+2. 尝试 OCR 变体月份映射（`M4R→MAR`, `M4Y→MAY`, `lAN→JAN`, `APRA→APR` 等）
+3. 若年份数字被 OCR 破坏（如 `2A25`），使用上一个有效年份的世纪（如 `2025`）
+4. 关键坑：`fix_ocr()` 不能在月份修复前应用数字替换（`0→O` 等会破坏标准日期格式如 `06-MAR-2026`）
+
+**两种文件格式 token 结构差异**：
+
+| 格式 | row[1] | row[2] | row[3] | row[7] |
+|------|--------|--------|--------|--------|
+| Excel（有序列号） | 序号 | 姓名 | 国籍 | PORT1 |
+| Excel（无序列号） | 姓名 | 国籍 | 出生日期 | PORT1 |
+
+字段偏移检测：根据 `row[1]` 是否为纯数字判断格式类型。
 
 ## 已知局限
-
-- PDF 输入需要根据实际布局调整（当前版本未实现）
-- 护照有效期、适任证书字段留空

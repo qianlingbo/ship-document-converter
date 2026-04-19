@@ -23,7 +23,7 @@ WORKSPACE = Path(__file__).parent.parent.resolve()
 REF_DIR   = WORKSPACE / "references"
 INPUT_DIR = WORKSPACE / "input"
 OUTPUT_DIR = WORKSPACE / "output"
-TEMPLATE_PATH = WORKSPACE / "templates" / "单证录入标准格式.xlsx"
+TEMPLATE_PATH = WORKSPACE / "templates" / "单证录入标准格式_v2.xlsx"
 
 # ── 加载参数映射 ────────────────────────────────────────────────────────────
 def load_refs():
@@ -100,7 +100,8 @@ def normalize_code(val, mapping):
         "MALAYSIA": "MY",
         "SINGAPORE": "SG",
         "NORWAY": "NO",
-        "GREECE": "GR",
+        "GREECE": "GR", "GREEK": "GR", "HELLENIC": "GR",
+        "PHILIPPINES": "PH", "FILIPINO": "PH",
         "MARSHALL ISLANDS": "MH",
     }
     for en_name, ccode in ENGLISH_COUNTRY_NAMES.items():
@@ -305,25 +306,70 @@ def _find_header_row(ws, keywords, require_all=True):
                 return i, [str(h).strip() if h else "" for h in row]
     return None, None
 
+def _read_crew_xlsx(path_str):
+    """读取 .xlsx 格式 crew list"""
+    wb = openpyxl.load_workbook(path_str, data_only=True)
+    ws = wb.active
+    return list(ws.iter_rows(values_only=True))
+
+def _read_crew_xls(path_str):
+    """读取 .xls 格式 crew list（xlrd）"""
+    import xlrd
+    wb = xlrd.open_workbook(path_str)
+    ws = wb.sheet_by_index(0)
+    rows = []
+    for r in range(ws.nrows):
+        row_data = []
+        for c in range(ws.ncols):
+            v = ws.cell_value(r, c)
+            t = ws.cell_type(r, c)
+            if t == 3:  # date
+                d = xlrd.xldate_as_datetime(v, wb.datemode)
+                row_data.append(d.strftime("%Y-%m-%d"))
+            else:
+                row_data.append(v)
+        rows.append(row_data)
+    return rows
+
 def read_crew_excel(path):
     """读取任意格式的crew list Excel，返回标准化数据列表"""
-    wb = openpyxl.load_workbook(path, data_only=True)
-    ws = wb.active
+    path_str = str(path)
+    suffix = Path(path).suffix.lower()
+
+    if suffix == ".xls":
+        all_rows = _read_crew_xls(path_str)
+    else:
+        all_rows = _read_crew_xlsx(path_str)
 
     # 扫描定位表头行（关键词：No. + Family name）
-    header_idx, headers = _find_header_row(ws, ["No.", "Family name", "Rank"])
+    header_idx = None
+    headers = None
+    for i, row in enumerate(all_rows):
+        row_text = " ".join(str(v).upper() for v in row if v is not None)
+        if "NO." in row_text and "FAMILY" in row_text and "RANK" in row_text:
+            header_idx = i
+            headers = [str(h).strip() if h else "" for h in row]
+            break
+
     if header_idx is None:
         # 回退：用第1行
         header_idx = 0
-        all_rows = list(ws.iter_rows(values_only=True))
         headers = [str(h).strip() if h else "" for h in all_rows[0]]
     print(f"  表头行={header_idx+1}, 列数={len(headers)}: {[h for h in headers if h][:12]}")
 
     crew_data = []
 
+    # 序号列（crew实际布局中 B列=index 1）
+    seq_col = 1
+
     # 扫描所有行，找到数据区（序号列含整数的行）
-    for i, row in enumerate(ws.iter_rows(values_only=True)):
+    for i, row in enumerate(all_rows):
         if i <= header_idx:
+            continue
+        # 过滤：序号列必须为数字（排除表头行和页脚行）
+        seq_val = str(row[seq_col]).strip() if seq_col < len(row) else ""
+        row_text_lower = " ".join(str(v).lower() for v in row if v)
+        if not seq_val.replace(".", "").isdigit() or "signature" in row_text_lower:
             continue
         if not any(v is not None for v in row):
             continue
@@ -446,32 +492,183 @@ def read_port_excel(path):
 
 # ── 从PDF读取port of call ──────────────────────────────────────────────────
 def read_port_pdf(path):
-    """用 pdfplumber 读取 port of call PDF"""
+    """用 pdfplumber 读取 port of call PDF，逐行解析（支持 OCR 污染）。
+
+    PDF 布局：每行一个港口，字段用空格分隔。
+    典型格式：seq port_name date1 date2 sec_level port_code purpose
+    OCR 污染可能导致日期跨行、港口名带噪声字符。
+    """
+    import re
+
     try:
         import pdfplumber
     except ImportError:
-        print("请安装 pdfplumber: pip install pdfplumber")
-        return []
-    
+        # 回退：用 pdftotext
+        import subprocess
+        result = subprocess.run(
+            ["pdftotext", str(path), "-"],
+            capture_output=True, text=True, timeout=30
+        )
+        text = result.stdout
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+    else:
+        with pdfplumber.open(str(path)) as pdf:
+            text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+
+    MONTH_MAP = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,
+                 "JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
+    # 按长度降序排列，避免短模式被长模式包含
+    MONTH_OCR_FIXES = sorted([
+        ("IULY", "JUL"), ("LTLY", "JUL"),
+        ("1AN", "JAN"), ("lAN", "JAN"),
+        ("M4R", "MAR"),
+        ("N0V", "NOV"), ("N0v", "NOV"),
+        ("5EP", "SEP"), ("sEP", "SEP"),
+        ("1UL", "JUL"),
+    ], key=lambda x: -len(x[0]))
+
+    def fix_ocr_month(s):
+        """先修复 OCR 月份变体，再转大写。"""
+        for wrong, correct in MONTH_OCR_FIXES:
+            s = s.replace(wrong, correct)
+        return s.upper()
+
+    def parse_all_dates(text):
+        """从文本中提取所有有效日期。"""
+        results = []
+        pattern = re.compile(r"(\d{1,2})\s*[^\w]*([A-Z0-9]{3})\s*[^\w]*(\d{4})", re.I)
+        last_valid_year = None
+        for m in pattern.finditer(text):
+            day_str, mon_raw, year_str = m.group(1), m.group(2), m.group(3)
+            # 年份 OCR 修复
+            yr_fixed = re.sub(r'[^0-9A-Z]', '', year_str.upper())
+            if len(yr_fixed) == 4 and yr_fixed.isdigit() and 2020 <= int(yr_fixed) <= 2030:
+                year = int(yr_fixed)
+            elif len(yr_fixed) == 4:
+                yr_map = {"A":"4","B":"8","O":"0","Z":"2","S":"5","Q":"0","I":"1","L":"1"}
+                cand = "".join(yr_map.get(c, c) for c in yr_fixed)
+                if cand.isdigit() and 2020 <= int(cand) <= 2030:
+                    year = int(cand)
+                elif last_valid_year is not None:
+                    century = last_valid_year // 100 * 100
+                    yr_candidate = int(str(century) + yr_fixed[-1])
+                    year = yr_candidate if 2020 <= yr_candidate <= 2030 else last_valid_year
+                else:
+                    year = None
+            else:
+                year = None
+            if year is None:
+                continue
+            # 月份 OCR 修复（先替换，再大写）
+            mon_fixed = fix_ocr_month(mon_raw)
+            if mon_fixed not in MONTH_MAP:
+                continue
+            try:
+                day = int(day_str)
+            except ValueError:
+                continue
+            if not (1 <= day <= 31):
+                continue
+            last_valid_year = year
+            results.append(f"{year}{MONTH_MAP[mon_fixed]:02d}{day:02d}")
+        return sorted(set(results))
+
+    # OCR 港口名映射
+    OCR_PORT_NAMES = {
+        "N EWCASTLE AUSTRA I,IA": "NEWCASTLE, AUSTRALIA",
+        "DANGJIN SOUTH KOREA":       "DANGJIN, SOUTH KOREA",
+        "CIADSTONE AUSTRALIA":       "GLADSTONE, AUSTRALIA",
+        "]INGTANG, CHINA":           "GINGTANG, CHINA",
+        "LANQIAO,CHINA":             "LANQIAO, CHINA",
+        "TUBARAO, BRAZII,":          "TUBARAO, BRAZIL",
+        ".LAwNSHAN, CHINA":          "LANSHAN, CHINA",
+        "FANGCHENG, CHINA":          "FANGCHENG, CHINA",
+        ".9Pff8Hftp -.":             "PORT OF CHINA",
+        "SINGAPORE":                 "SINGAPORE",
+    }
+    OCR_PORT_CODES = {
+        "AUNTL":  "AU-NTL",
+        "I(RT]I": "AU-PRT",
+        "AUCLT":  "AU-CLT",
+        "CNJTC":  "CNJTC",
+        "CNI,NQ": "CNINQ",
+        "BRTUB":  "BRTUB",
+        "scsrN":  "SGSIN",
+        "CNLAN":  "CNLAN",
+        "CNFAN":  "CNFAN",
+        "BRCIB":  "BRCIB",
+    }
+
+    def clean_port_name(s):
+        """清理港口名中的 OCR 噪声字符。"""
+        s = re.sub(r'[\[\]|\\(){}]', ' ', s)
+        s = re.sub(r'[^A-Z\s,]', ' ', s.upper())
+        s = re.sub(r'\s+', ' ', s).strip()
+        return s
+
+    def extract_port_name_from_line(line):
+        """从行中提取港口名（去掉序号和日期后的第一段）。"""
+        # 先从 OCR 映射表匹配
+        for ocr_key, clean_name in OCR_PORT_NAMES.items():
+            if ocr_key in line:
+                return clean_name
+        # 回退：去掉开头序号、日期、港口代码
+        s = re.sub(r'^\d+\s*', '', line)          # 去掉开头序号
+        s = re.sub(r'\d{1,2}\s*-\s*[A-Z0-9]{3}\s*-\s*\d{4}', ' ', s, flags=re.I)  # 去掉日期
+        s = re.sub(r'\b[A-Z]{2,10}\b', ' ', s)    # 去掉大写字母代码
+        s = re.sub(r'\b\d+\b', ' ', s)             # 去掉孤立数字
+        s = clean_port_name(s)
+        return s
+
+    def extract_port_code_from_line(line):
+        """从行中提取港口代码。"""
+        for ocr_key, clean_code in OCR_PORT_CODES.items():
+            if ocr_key in line:
+                return clean_code
+        return ""
+
+    def parse_seq_from_line(line):
+        """从行首解析港口序号。"""
+        first = line.split()[0] if line.split() else ""
+        seq_map = {'1':1,'2':2,'3':3,'4':4,'5':5,'6':6,'7':7,'8':8,'9':9,'10':10,'I':7}
+        clean = re.sub(r'[^A-Z0-9]', '', first.upper())
+        if clean.isdigit() and 1 <= int(clean) <= 10:
+            return int(clean)
+        if clean in seq_map:
+            return seq_map[clean]
+        return None
+
     ports_data = []
-    with pdfplumber.open(path) as pdf:
-        for page in pdf.pages:
-            tables = page.extract_tables()
-            for table in tables:
-                for row in table:
-                    if not row or not any(row):
-                        continue
-                    p = {}
-                    for j, val in enumerate(row):
-                        if not val:
-                            continue
-                        vs = str(val).strip()
-                        if "PORT" in vs.upper() or any(c.isalpha() for c in vs):
-                            if len(vs) > 2:
-                                p["_raw_port"] = val
-                    if p:
-                        ports_data.append(p)
-    
+    for line in lines:
+        if not line or len(line) < 5:
+            continue
+        seq = parse_seq_from_line(line)
+        if seq is None:
+            continue
+        if not (1 <= seq <= 10):
+            continue
+
+        dates = parse_all_dates(line)
+        arrival = dates[0] if len(dates) >= 1 else None
+        departure = dates[1] if len(dates) >= 2 else None
+
+        port_name = extract_port_name_from_line(line)
+        port_code = extract_port_code_from_line(line)
+
+        if not arrival or not departure:
+            continue
+        if len(port_name) < 2:
+            continue
+
+        ports_data.append({
+            "_raw_port": port_name,
+            "_port_code": port_code,
+            "_raw_arrival": arrival,
+            "_raw_departure": departure,
+            "_raw_seq": str(seq),
+        })
+
     return ports_data
 
 # ── 船员数据标准化 ─────────────────────────────────────────────────────────
