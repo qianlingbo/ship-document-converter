@@ -140,6 +140,34 @@ def match_port(val):
 
     return None
 
+def random_port_same_country(port_raw):
+    """港口匹配不到时，根据港口代码前两位（国家代码）随机选择同国家的其他港口"""
+    if not port_raw:
+        return None
+    v = str(port_raw).strip().upper()
+    # 尝试提取国家代码：港口代码前两位，或逗号后面的国家名
+    country_prefix = None
+    if len(v) >= 2 and v[:2].isalpha():
+        country_prefix = v[:2]
+    elif "," in v:
+        parts = [p.strip() for p in v.split(",")]
+        # 最后一段可能是国家名，从 NATIONALITY_MAP 里找代码
+        for part in reversed(parts):
+            code = normalize_code(part, NATIONALITY_MAP)
+            if code and len(code) >= 2:
+                # 取代码前两位
+                country_prefix = code[:2]
+                break
+    
+    if not country_prefix:
+        return None
+    
+    # 找所有同国家前缀的港口
+    candidates = [full for code, full in PORT_MAP.items() if code[:2].upper() == country_prefix]
+    if candidates:
+        return random.choice(candidates)
+    return None
+
 def match_duty(val):
     """匹配职务：输入值 → 参数B列完整字符串，找不到返回默认值规则"""
     if not val:
@@ -560,8 +588,10 @@ def normalize_crew(raw_list, default_port=None, default_joindate=None):
         # 国籍
         nation_code = c.get("_raw_nation", "")
         nation_mapped = normalize_code(nation_code, NATIONALITY_MAP)
+        _nation_fallback = False
         if not nation_mapped:
-            nation_mapped = normalize_code("CN", NATIONALITY_MAP)  # 默认中国
+            nation_mapped = ""  # 匹配不到留空
+            _nation_fallback = True
         
         nation_code2 = nation_mapped.split("-")[0] if nation_mapped else "CN"
         is_chinese = nation_code2 == "CN"
@@ -654,7 +684,8 @@ def normalize_crew(raw_list, default_port=None, default_joindate=None):
             "证件检查地点": "",        # 空白
             "登船日期": joindate or "",
             "登船口岸": port_mapped or "",
-            "备注": ""
+            "备注": "",
+            "_nation_fallback": _nation_fallback
         }
         result.append(entry)
     
@@ -676,6 +707,12 @@ def normalize_ports(raw_list):
         
         # 港口
         port_mapped = match_port(port_raw)
+        _port_fallback = False
+        if not port_mapped:
+            # 匹配不到：随机选同国家的其他港口，标红
+            port_mapped = random_port_same_country(port_raw)
+            if port_mapped:
+                _port_fallback = True
         
         # 国家/地区
         if country_raw:
@@ -712,14 +749,22 @@ def normalize_ports(raw_list):
             "国家/地区名称": country_mapped or "",
             "船舶保安等级": security_level,
             "特别或附加的保安设施": "",  # 空白
-            "停靠港口": port_mapped or "",  # 找不到=空白
-            "港口保安等级": port_security
+            "停靠港口": port_mapped or "",
+            "港口保安等级": port_security,
+            "_port_fallback": _port_fallback
         }
         result.append(entry)
     
     return result
 
 # ── 写入Excel ──────────────────────────────────────────────────────────────
+RED_FILL = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")
+
+def _mark_row_red(ws, row, max_col):
+    """将整行标红（浅红背景）"""
+    for col in range(1, max_col + 1):
+        ws.cell(row=row, column=col).fill = RED_FILL
+
 def fill_crew_sheet(template_wb, crew_list):
     """填写船员名单sheet"""
     ws = template_wb["船上非旅客人员清单"]
@@ -747,6 +792,10 @@ def fill_crew_sheet(template_wb, crew_list):
         ws.cell(row=row, column=13).value = c["证件检查地点"]
         ws.cell(row=row, column=14).value = c["登船日期"]
         ws.cell(row=row, column=15).value = c["登船口岸"]
+        
+        # 国籍匹配不到 → 整行标红
+        if c.get("_nation_fallback"):
+            _mark_row_red(ws, row, 16)
         ws.cell(row=row, column=16).value = c["备注"]
 
 def fill_goods_sheet(template_wb, crew_list):
@@ -789,6 +838,10 @@ def fill_port_sheet(template_wb, ports_list):
         ws.cell(row=row, column=6).value = p["特别或附加的保安设施"]
         ws.cell(row=row, column=7).value = p["停靠港口"]
         ws.cell(row=row, column=8).value = p["港口保安等级"]
+        
+        # 停靠港口匹配不到、用了同国家随机港口 → 整行标红
+        if p.get("_port_fallback"):
+            _mark_row_red(ws, row, 8)
 
 # ── 主入口 ─────────────────────────────────────────────────────────────────
 def process(crew_path, port_path=None, output_name=None):
