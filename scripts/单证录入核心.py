@@ -5,6 +5,7 @@
 """
 
 import os
+import re
 import sys
 import json
 import random
@@ -23,7 +24,7 @@ WORKSPACE = Path(__file__).parent.parent.resolve()
 REF_DIR   = WORKSPACE / "references"
 INPUT_DIR = WORKSPACE / "input"
 OUTPUT_DIR = WORKSPACE / "output"
-TEMPLATE_PATH = WORKSPACE / "templates" / "单证录入标准格式_v2.xlsx"
+TEMPLATE_PATH = WORKSPACE / "templates" / "单证录入标准格式.xlsx"
 
 # ── 加载参数映射 ────────────────────────────────────────────────────────────
 def load_refs():
@@ -100,8 +101,7 @@ def normalize_code(val, mapping):
         "MALAYSIA": "MY",
         "SINGAPORE": "SG",
         "NORWAY": "NO",
-        "GREECE": "GR", "GREEK": "GR", "HELLENIC": "GR",
-        "PHILIPPINES": "PH", "FILIPINO": "PH",
+        "GREECE": "GR",
         "MARSHALL ISLANDS": "MH",
     }
     for en_name, ccode in ENGLISH_COUNTRY_NAMES.items():
@@ -153,9 +153,9 @@ def match_duty(val):
         "2/O": "53-二副", "SECOND OFFICER": "53-二副",
         "3/O": "54-三副", "THIRD OFFICER": "54-三副",
         "C/E": "61-轮机长", "CHIEF ENGINEER": "61-轮机长",
-        "2/E": "63-二管轮", "SECOND ENGINEER": "63-二管轮",
-        "3/E": "64-三管轮", "THIRD ENGINEER": "64-三管轮",
-        "4/E": "65-值班机工", "FOURTH ENGINEER": "65-值班机工",
+        "2/E": "62-大管轮", "SECOND ENGINEER": "62-大管轮",
+        "3/E": "63-二管轮", "THIRD ENGINEER": "63-二管轮",
+        "4/E": "64-三管轮", "FOURTH ENGINEER": "64-三管轮",
         "BSN": "55-值班水手", "BOSUN": "55-值班水手",
         "AB1": "56-高级值班水手", "ABLE SEAMAN": "56-高级值班水手",
         "AB2": "55-值班水手",
@@ -164,13 +164,28 @@ def match_duty(val):
         "OIL1": "66-高级值班机工", "OIL": "66-高级值班机工",
         "OIL2": "66-高级值班机工",
         "OIL3": "66-高级值班机工",
-        "FITTER": "65-值班机工",
+        "FITTER": "65-值班机工", "FTR": "65-值班机工",
         "E/E": "66-高级值班机工", "ELECTRICIAN": "66-高级值班机工",
+        "ETO": "66-高级值班机工", "ELECTRO-TECHNICAL OFFICER": "66-高级值班机工",
+        "OLR": "66-高级值班机工", "OILER": "66-高级值班机工",
+        "AB4": "55-值班水手",
         "COOK": "65-值班机工", "CHEF": "65-值班机工", "GALLEY": "65-值班机工",
-        "PUMPMAN": "65-值班机工",
-        "STEWARD": "65-值班机工",
-        "MESSMAN": "65-值班机工",
+        "C/CK": "65-值班机工", "CHIEF COOK": "65-值班机工",
+        "D/T": "55-值班水手", "DECK TRAINEE": "55-值班水手",
+        "E/T": "65-值班机工", "ENGINE TRAINEE": "65-值班机工",
+        "PUMPMAN": "65-值班机工", "P/MAN": "65-值班机工",
+        "STEWARD": "65-值班机工", "STD": "65-值班机工",
+        "MESSMAN": "65-值班机工", "M/M": "65-值班机工",
         "TALLY CLERK": "65-值班机工",
+        "AB": "56-高级值班水手", "A/B": "56-高级值班水手",
+        "OS": "55-值班水手", "ORDINARY SEAMAN": "55-值班水手",
+        "WPR": "65-值班机工", "WIPER": "65-值班机工",
+        "1/E": "62-大管轮", "FIRST ENGINEER": "62-大管轮",
+        "1/O": "52-大副",
+        "RADIO OFFICER": "66-高级值班机工", "R/O": "66-高级值班机工",
+        "CADET": "55-值班水手",
+        "TRAINEE": "55-值班水手",
+        "S/M": "65-值班机工",
     }
     if v in ENGLISH_RANK_MAP:
         return ENGLISH_RANK_MAP[v]
@@ -190,8 +205,9 @@ def normalize_date(val):
     # 支持 datetime 对象
     if hasattr(val, 'strftime'):
         return val.strftime('%Y%m%d')
-    s = str(val).strip()
-    for fmt in ["%Y-%m-%d", "%Y/%m/%d", "%Y%m%d", "%d/%m/%Y", "%d-%m-%Y"]:
+    s = str(val).strip().replace(" ", "")
+    for fmt in ["%Y-%m-%d", "%Y/%m/%d", "%Y%m%d", "%d/%m/%Y", "%d-%m-%Y",
+                "%d/%b/%Y", "%d-%b-%Y", "%d/%B/%Y", "%d-%B-%Y"]:
         try:
             return datetime.strptime(s, fmt).strftime("%Y%m%d")
         except:
@@ -266,6 +282,15 @@ def _normalize_country_name(raw_name, mapping):
         return None
     return normalize_code(v, mapping)
 
+def _extract_chinese(text):
+    """从混合文本中提取中文字符部分（保留中文及中间空格）"""
+    chars = re.findall(r'[\u4e00-\u9fff\u3400-\u4dbf]', text)
+    return ''.join(chars) if chars else None
+
+def _has_chinese(text):
+    """检测文本中是否包含中文字符"""
+    return bool(re.search(r'[\u4e00-\u9fff\u3400-\u4dbf]', text))
+
 # ── 职务分配规则 ──────────────────────────────────────────────────────────
 # 找不到B列时：保证3个高级值班水手(56) + 3个高级值班机工(66)
 # 其余分配55-值班水手和65-值班机工
@@ -306,105 +331,107 @@ def _find_header_row(ws, keywords, require_all=True):
                 return i, [str(h).strip() if h else "" for h in row]
     return None, None
 
-def _read_crew_xlsx(path_str):
-    """读取 .xlsx 格式 crew list"""
-    wb = openpyxl.load_workbook(path_str, data_only=True)
-    ws = wb.active
-    return list(ws.iter_rows(values_only=True))
-
-def _read_crew_xls(path_str):
-    """读取 .xls 格式 crew list（xlrd）"""
-    import xlrd
-    wb = xlrd.open_workbook(path_str)
-    ws = wb.sheet_by_index(0)
-    rows = []
-    for r in range(ws.nrows):
-        row_data = []
-        for c in range(ws.ncols):
-            v = ws.cell_value(r, c)
-            t = ws.cell_type(r, c)
-            if t == 3:  # date
-                d = xlrd.xldate_as_datetime(v, wb.datemode)
-                row_data.append(d.strftime("%Y-%m-%d"))
-            else:
-                row_data.append(v)
-        rows.append(row_data)
-    return rows
+def _parse_combined_field(val):
+    """解析IMO Crew List中日期+文本的组合字段，如 '28/Nov/1986  SHANDONG' → (date_str, text_str)"""
+    if not val:
+        return None, None
+    s = str(val).strip()
+    # 尝试用正则拆分：日期部分 (dd/Mon/yyyy 或 dd/mm/yyyy) + 剩余文本
+    # 匹配 dd/Mon/yyyy 或 dd/MM/yyyy 格式的日期
+    m = re.match(r'(\d{1,2}[/-]\s*\w{2,9}[/-]\s*\d{4})\s*(.*)', s)
+    if m:
+        return m.group(1).replace(' ', ''), m.group(2).strip()
+    # 匹配 yyyy/mm/dd 格式
+    m = re.match(r'(\d{4}[/-]\d{1,2}[/-]\d{1,2})\s*(.*)', s)
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    return s, None
 
 def read_crew_excel(path):
     """读取任意格式的crew list Excel，返回标准化数据列表"""
-    path_str = str(path)
-    suffix = Path(path).suffix.lower()
+    wb = openpyxl.load_workbook(path, data_only=True)
+    ws = wb.active
 
-    if suffix == ".xls":
-        all_rows = _read_crew_xls(path_str)
-    else:
-        all_rows = _read_crew_xlsx(path_str)
-
-    # 扫描定位表头行（关键词：No. + Family name）
-    header_idx = None
-    headers = None
-    for i, row in enumerate(all_rows):
-        row_text = " ".join(str(v).upper() for v in row if v is not None)
-        if "NO." in row_text and "FAMILY" in row_text and "RANK" in row_text:
-            header_idx = i
-            headers = [str(h).strip() if h else "" for h in row]
-            break
-
+    # 扫描定位表头行（关键词：No. + Family name + Rank）
+    header_idx, headers = _find_header_row(ws, ["No.", "Family name", "Rank"])
+    if header_idx is None:
+        # 回退：尝试只匹配 No. + Rank
+        header_idx, headers = _find_header_row(ws, ["No.", "Rank"])
     if header_idx is None:
         # 回退：用第1行
         header_idx = 0
+        all_rows = list(ws.iter_rows(values_only=True))
         headers = [str(h).strip() if h else "" for h in all_rows[0]]
     print(f"  表头行={header_idx+1}, 列数={len(headers)}: {[h for h in headers if h][:12]}")
 
+    # 构建列名→索引的映射（模糊匹配）
+    col_map = {}
+    for idx, h in enumerate(headers):
+        hu = h.upper()
+        if "NO" in hu and ("NO" == hu.strip().rstrip(".") or "NO." in hu):
+            col_map.setdefault("no", idx)
+        if "NAME" in hu or "FAMILY" in hu:
+            col_map.setdefault("name", idx)
+        if "RANK" in hu or "RATING" in hu:
+            col_map.setdefault("rank", idx)
+        if "SEX" in hu:
+            col_map.setdefault("sex", idx)
+        if "NATIONAL" in hu:
+            col_map.setdefault("nation", idx)
+        if "BIRTH" in hu:
+            col_map.setdefault("birth", idx)
+        if "SEAMAN" in hu or "BOOK" in hu:
+            col_map.setdefault("seaman_book", idx)
+        if "PASSPORT" in hu:
+            col_map.setdefault("passport", idx)
+        if "JOIN" in hu or ("DATE" in hu and "PLACE" in hu and "JOIN" in hu):
+            col_map.setdefault("join", idx)
+    print(f"  列映射: {col_map}")
+
     crew_data = []
 
-    # 序号列（crew实际布局中 B列=index 1）
-    seq_col = 1
-
     # 扫描所有行，找到数据区（序号列含整数的行）
-    for i, row in enumerate(all_rows):
+    for i, row in enumerate(ws.iter_rows(values_only=True)):
         if i <= header_idx:
-            continue
-        # 过滤：序号列必须为数字（排除表头行和页脚行）
-        seq_val = str(row[seq_col]).strip() if seq_col < len(row) else ""
-        row_text_lower = " ".join(str(v).lower() for v in row if v)
-        if not seq_val.replace(".", "").isdigit() or "signature" in row_text_lower:
             continue
         if not any(v is not None for v in row):
             continue
 
-        # 尝试从列索引直接取值（crew实际布局固定）
-        # col B(1)=No., C(2)=Name, D(3)=Sex, E(4)=Rank, F(5)=Nationality,
-        # G(6)=Birth, H(7)=BirthPlace, I(8)=PassportNo, J(9)=PassportExp,
-        # K(10)=JoinDate, L(11)=JoinPlace
-        def g(j): return row[j] if j < len(row) else None
+        def g(j): return row[j] if j is not None and j < len(row) else None
 
-        no_val = g(1)
-        name = g(2)
-        sex = g(3)
-        rank = g(4)
-        nation = g(5)
-        birth = g(6)
-        birth_place = g(7)
-        passport = g(8)
-        passport_exp = g(9)
-        join_date = g(10)
-        join_place = g(11)
+        no_val = g(col_map.get("no", 0))
+        name = g(col_map.get("name", 1))
+        rank = g(col_map.get("rank", 2))
+        sex = g(col_map.get("sex", 3))
+        nation = g(col_map.get("nation", 4))
+        birth_combined = g(col_map.get("birth", 5))
+        seaman_combined = g(col_map.get("seaman_book", 6))
+        passport_combined = g(col_map.get("passport", 7))
+        join_combined = g(col_map.get("join", 8))
 
         # 只保留有姓名的行
         if not name:
             continue
 
-        # 序号必须是整数
+        # 序号必须是整数（支持int、float、纯数字字符串）
         if isinstance(no_val, (int, float)) or (isinstance(no_val, str) and no_val.strip().isdigit()):
+            # 解析组合字段：日期 + 地点/编号
+            birth_date, birth_place = _parse_combined_field(birth_combined)
+            seaman_exp, seaman_no = _parse_combined_field(seaman_combined)
+            passport_exp, passport_no = _parse_combined_field(passport_combined)
+            join_date, join_place = _parse_combined_field(join_combined)
+
             c = {
                 "_raw_name": name,
                 "_raw_sex": sex,
                 "_raw_duty": rank,
                 "_raw_nation": nation,
-                "_raw_birth": birth,
-                "_raw_passport": passport,
+                "_raw_birth": birth_date,
+                "_raw_birth_place": birth_place,
+                "_raw_passport": passport_no,
+                "_raw_passport_exp": passport_exp,
+                "_raw_seaman_no": seaman_no,
+                "_raw_seaman_exp": seaman_exp,
                 "_raw_port": join_place,
                 "_raw_joindate": join_date,
             }
@@ -492,183 +519,32 @@ def read_port_excel(path):
 
 # ── 从PDF读取port of call ──────────────────────────────────────────────────
 def read_port_pdf(path):
-    """用 pdfplumber 读取 port of call PDF，逐行解析（支持 OCR 污染）。
-
-    PDF 布局：每行一个港口，字段用空格分隔。
-    典型格式：seq port_name date1 date2 sec_level port_code purpose
-    OCR 污染可能导致日期跨行、港口名带噪声字符。
-    """
-    import re
-
+    """用 pdfplumber 读取 port of call PDF"""
     try:
         import pdfplumber
     except ImportError:
-        # 回退：用 pdftotext
-        import subprocess
-        result = subprocess.run(
-            ["pdftotext", str(path), "-"],
-            capture_output=True, text=True, timeout=30
-        )
-        text = result.stdout
-        lines = [l.strip() for l in text.splitlines() if l.strip()]
-    else:
-        with pdfplumber.open(str(path)) as pdf:
-            text = "\n".join(page.extract_text() or "" for page in pdf.pages)
-        lines = [l.strip() for l in text.splitlines() if l.strip()]
-
-    MONTH_MAP = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,
-                 "JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
-    # 按长度降序排列，避免短模式被长模式包含
-    MONTH_OCR_FIXES = sorted([
-        ("IULY", "JUL"), ("LTLY", "JUL"),
-        ("1AN", "JAN"), ("lAN", "JAN"),
-        ("M4R", "MAR"),
-        ("N0V", "NOV"), ("N0v", "NOV"),
-        ("5EP", "SEP"), ("sEP", "SEP"),
-        ("1UL", "JUL"),
-    ], key=lambda x: -len(x[0]))
-
-    def fix_ocr_month(s):
-        """先修复 OCR 月份变体，再转大写。"""
-        for wrong, correct in MONTH_OCR_FIXES:
-            s = s.replace(wrong, correct)
-        return s.upper()
-
-    def parse_all_dates(text):
-        """从文本中提取所有有效日期。"""
-        results = []
-        pattern = re.compile(r"(\d{1,2})\s*[^\w]*([A-Z0-9]{3})\s*[^\w]*(\d{4})", re.I)
-        last_valid_year = None
-        for m in pattern.finditer(text):
-            day_str, mon_raw, year_str = m.group(1), m.group(2), m.group(3)
-            # 年份 OCR 修复
-            yr_fixed = re.sub(r'[^0-9A-Z]', '', year_str.upper())
-            if len(yr_fixed) == 4 and yr_fixed.isdigit() and 2020 <= int(yr_fixed) <= 2030:
-                year = int(yr_fixed)
-            elif len(yr_fixed) == 4:
-                yr_map = {"A":"4","B":"8","O":"0","Z":"2","S":"5","Q":"0","I":"1","L":"1"}
-                cand = "".join(yr_map.get(c, c) for c in yr_fixed)
-                if cand.isdigit() and 2020 <= int(cand) <= 2030:
-                    year = int(cand)
-                elif last_valid_year is not None:
-                    century = last_valid_year // 100 * 100
-                    yr_candidate = int(str(century) + yr_fixed[-1])
-                    year = yr_candidate if 2020 <= yr_candidate <= 2030 else last_valid_year
-                else:
-                    year = None
-            else:
-                year = None
-            if year is None:
-                continue
-            # 月份 OCR 修复（先替换，再大写）
-            mon_fixed = fix_ocr_month(mon_raw)
-            if mon_fixed not in MONTH_MAP:
-                continue
-            try:
-                day = int(day_str)
-            except ValueError:
-                continue
-            if not (1 <= day <= 31):
-                continue
-            last_valid_year = year
-            results.append(f"{year}{MONTH_MAP[mon_fixed]:02d}{day:02d}")
-        return sorted(set(results))
-
-    # OCR 港口名映射
-    OCR_PORT_NAMES = {
-        "N EWCASTLE AUSTRA I,IA": "NEWCASTLE, AUSTRALIA",
-        "DANGJIN SOUTH KOREA":       "DANGJIN, SOUTH KOREA",
-        "CIADSTONE AUSTRALIA":       "GLADSTONE, AUSTRALIA",
-        "]INGTANG, CHINA":           "GINGTANG, CHINA",
-        "LANQIAO,CHINA":             "LANQIAO, CHINA",
-        "TUBARAO, BRAZII,":          "TUBARAO, BRAZIL",
-        ".LAwNSHAN, CHINA":          "LANSHAN, CHINA",
-        "FANGCHENG, CHINA":          "FANGCHENG, CHINA",
-        ".9Pff8Hftp -.":             "PORT OF CHINA",
-        "SINGAPORE":                 "SINGAPORE",
-    }
-    OCR_PORT_CODES = {
-        "AUNTL":  "AU-NTL",
-        "I(RT]I": "AU-PRT",
-        "AUCLT":  "AU-CLT",
-        "CNJTC":  "CNJTC",
-        "CNI,NQ": "CNINQ",
-        "BRTUB":  "BRTUB",
-        "scsrN":  "SGSIN",
-        "CNLAN":  "CNLAN",
-        "CNFAN":  "CNFAN",
-        "BRCIB":  "BRCIB",
-    }
-
-    def clean_port_name(s):
-        """清理港口名中的 OCR 噪声字符。"""
-        s = re.sub(r'[\[\]|\\(){}]', ' ', s)
-        s = re.sub(r'[^A-Z\s,]', ' ', s.upper())
-        s = re.sub(r'\s+', ' ', s).strip()
-        return s
-
-    def extract_port_name_from_line(line):
-        """从行中提取港口名（去掉序号和日期后的第一段）。"""
-        # 先从 OCR 映射表匹配
-        for ocr_key, clean_name in OCR_PORT_NAMES.items():
-            if ocr_key in line:
-                return clean_name
-        # 回退：去掉开头序号、日期、港口代码
-        s = re.sub(r'^\d+\s*', '', line)          # 去掉开头序号
-        s = re.sub(r'\d{1,2}\s*-\s*[A-Z0-9]{3}\s*-\s*\d{4}', ' ', s, flags=re.I)  # 去掉日期
-        s = re.sub(r'\b[A-Z]{2,10}\b', ' ', s)    # 去掉大写字母代码
-        s = re.sub(r'\b\d+\b', ' ', s)             # 去掉孤立数字
-        s = clean_port_name(s)
-        return s
-
-    def extract_port_code_from_line(line):
-        """从行中提取港口代码。"""
-        for ocr_key, clean_code in OCR_PORT_CODES.items():
-            if ocr_key in line:
-                return clean_code
-        return ""
-
-    def parse_seq_from_line(line):
-        """从行首解析港口序号。"""
-        first = line.split()[0] if line.split() else ""
-        seq_map = {'1':1,'2':2,'3':3,'4':4,'5':5,'6':6,'7':7,'8':8,'9':9,'10':10,'I':7}
-        clean = re.sub(r'[^A-Z0-9]', '', first.upper())
-        if clean.isdigit() and 1 <= int(clean) <= 10:
-            return int(clean)
-        if clean in seq_map:
-            return seq_map[clean]
-        return None
-
+        print("请安装 pdfplumber: pip install pdfplumber")
+        return []
+    
     ports_data = []
-    for line in lines:
-        if not line or len(line) < 5:
-            continue
-        seq = parse_seq_from_line(line)
-        if seq is None:
-            continue
-        if not (1 <= seq <= 10):
-            continue
-
-        dates = parse_all_dates(line)
-        arrival = dates[0] if len(dates) >= 1 else None
-        departure = dates[1] if len(dates) >= 2 else None
-
-        port_name = extract_port_name_from_line(line)
-        port_code = extract_port_code_from_line(line)
-
-        if not arrival or not departure:
-            continue
-        if len(port_name) < 2:
-            continue
-
-        ports_data.append({
-            "_raw_port": port_name,
-            "_port_code": port_code,
-            "_raw_arrival": arrival,
-            "_raw_departure": departure,
-            "_raw_seq": str(seq),
-        })
-
+    with pdfplumber.open(path) as pdf:
+        for page in pdf.pages:
+            tables = page.extract_tables()
+            for table in tables:
+                for row in table:
+                    if not row or not any(row):
+                        continue
+                    p = {}
+                    for j, val in enumerate(row):
+                        if not val:
+                            continue
+                        vs = str(val).strip()
+                        if "PORT" in vs.upper() or any(c.isalpha() for c in vs):
+                            if len(vs) > 2:
+                                p["_raw_port"] = val
+                    if p:
+                        ports_data.append(p)
+    
     return ports_data
 
 # ── 船员数据标准化 ─────────────────────────────────────────────────────────
@@ -695,9 +571,14 @@ def normalize_crew(raw_list, default_port=None, default_joindate=None):
         if not name:
             continue
         if is_chinese:
-            # 保持中文
-            pass
+            # 中国船员：只保留中文部分（如果原始数据同时有英文和中文）
+            if _has_chinese(name):
+                chinese_part = _extract_chinese(name)
+                if chinese_part:
+                    name = chinese_part
+            # 如果只有英文（没有中文字符），保留原样
         else:
+            # 外国船员：全部转大写英文
             name = name.upper()
         
         # 性别
@@ -710,7 +591,13 @@ def normalize_crew(raw_list, default_port=None, default_joindate=None):
         birth = normalize_date(c.get("_raw_birth", ""))
         
         # 出生地点
-        birth_place = get_nationality_chinese(nation_code2)
+        # 中国船员：无论源数据写了什么（省市、拼音、英文），一律输出"中国"
+        # 外国船员：优先保留源数据原文，无源数据时用国籍中文名兜底
+        if is_chinese:
+            birth_place = "中国"
+        else:
+            raw_bp = str(c.get("_raw_birth_place", "") or "").strip()
+            birth_place = raw_bp if raw_bp else get_nationality_chinese(nation_code2)
         
         # 职务
         duty_raw = c.get("_raw_duty", "")
@@ -727,14 +614,15 @@ def normalize_crew(raw_list, default_port=None, default_joindate=None):
                 role_type = "sailor"
             duty_mapped = ""  # 待分配
         
-        # 证件类型
+        # 证件类型 & 证件号码
         if is_chinese:
             cert_type = "17-海员证"
+            # 中国船员优先使用海员证号码
+            seaman_no = str(c.get("_raw_seaman_no", "")).strip()
+            passport = seaman_no if seaman_no else str(c.get("_raw_passport", "")).strip()
         else:
             cert_type = "14-普通护照"
-        
-        # 证件号码
-        passport = str(c.get("_raw_passport", "")).strip()
+            passport = str(c.get("_raw_passport", "")).strip()
         
         # 登船口岸
         port_raw = c.get("_raw_port", default_port)
