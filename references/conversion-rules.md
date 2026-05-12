@@ -118,7 +118,7 @@ SPECIAL_PORT_OVERRIDE = {
     "SHEKOU": "CNSHK-蛇口(Shekou)",
     "XIAMEN": "CNXMN-厦门(Xiamen)",
     "QINGDAO": "CNTAO-青岛(Qingdao)",
-    "NINGBO": "CNNGB-宁波(Ningbo)",
+    "NINGBO": "CNNBO-CNNBO-宁波(Ningbo)",
     "TIANJIN": "CNTXG-天津(Tianjin)",
     "DALIAN": "CNDLC-大连(Dalian)",
     "HONGKONG": "CNHKG-香港(Hongkong)",
@@ -202,3 +202,86 @@ def match_port(val):
 ## 10. 港口活动时间
 
 进港时间随机 `00:00-12:00`，离港时间 `12:00-24:00`
+
+## 11. Port of Call 港口 fallback 速查表
+
+以下港口在 `port_map.json` 中不存在（测试于 UNIVERSE HARMONY / IMO 9222546 的 LAST TEN PORT），手动映射已验证可用：
+
+| 原始港口名 | 替代港口 | 替代代码 | 国家 |
+|------------|----------|----------|------|
+| OPEN SEA | 公海 | THS-公海 | UN |
+| CHENJIIAGANG | 天津新港 | CNTXG-天津新港(Tianjingang) | CN |
+| KENDARI | 乌戎潘当 | IDUPG-乌戎潘当(Ujung Pandang) | ID |
+| MORMUGAO | 哈迪亚 | INHDA-哈迪亚(HALDIA) | IN |
+| GO DAU | 岘港 | VNDAD-岘港(Da-Nang/ Da Nang) | VN |
+| LEAMCHABANG | 林查班 | THLCH-林查班(Laem Chabang) | TH |
+
+## 12. RED FILL 颜色格式（openpyxl 坑点）
+
+`PatternFill` 颜色必须使用 **ARGB 格式**（8位hex），`FF` = 完全不透明，`CC` = 半透明浅红：
+```python
+RED_FILL = PatternFill(start_color="FFFFCCCC", end_color="FFFFCCCC", fill_type="solid")  # ✅ 正确（Alpha=FF 完全不透明）
+RED_FILL = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")      # ❌ 缺少Alpha通道 → 透明红色
+```
+实际效果：`start_color="FFCCCC"` = 透明色（完全看不见）；`start_color="FFFFCCCC"` = 可见浅红色。
+
+## 13. `random_port_same_country()` bug
+
+**bug**：函数从 port 名取前2字符作为国家码（如 `GO DAU` → `GO` 共和国，`LEAMCHABANG` → `LE` 莱索托），导致随机选到错误国家的港口。
+
+**正确做法**：从 `_raw_country` 字段（原始国家名）用 `normalize_code()` 获取完整国家代码，再取其前2位作为国家前缀筛选 port_map。
+
+```python
+# 错误 ❌
+country_prefix = v[:2]  # "GO DAU" → "GO" (加纳共和国)
+
+# 正确 ✅
+country_code = normalize_code(country_raw, NATIONALITY_MAP)  # "VIETNAM" → "VN-越南"
+country_prefix = country_code[:2]  # "VN"
+candidates = [full for code, full in PORT_MAP.items() if code[:2].upper() == country_prefix]
+```
+
+## 14. Port of Call 仅处理模式
+
+当用户说"仅处理这个文件"且文件只有 Port of Call 时：
+- 调用 `normalize_ports(raw_ports)` 只生成海事活动信息
+- 船员 sheet 留空，无需造假数据
+- 直接读取 Port of Call Excel/文件，填写"海事船岸活动信息" sheet 即可
+
+## 15. Port of Call PDF 日期格式
+
+POC PDF（如 IMO 标准格式 LAST 10 PORTS OF CALL）中，日期格式为 `dd-Mon-yyyy`（PDF文本层），例如：
+- `09-May-2026`
+- `26-03-29 & 07-00-00`（日期 + 时间，连字符分隔）
+
+**⚠️ 解析注意事项**：
+- PDF 文本中日期是 `dd-Mon-yyyy`（如 `26-Mar-2026`），需用 `%d-%b-%Y` 解析
+- 如果是 `26-03-29` 格式（无月份名），可能是 `%y-%m-%d`
+- 时间部分用 `&` 分隔：`26-03-29 & 07-00-00`
+- **港口顺序**：从新到旧（PDF第1行=最新进港），不要反转
+
+```python
+def parse_poc_pdf_date(s):
+    """解析 '26-03-29 & 07-00-00' 或 '09-May-2026' 格式"""
+    s = s.strip()
+    # 分离日期和时间
+    date_part = s.split('&')[0].strip()
+    time_part = s.split('&')[1].strip() if '&' in s else None
+
+    for fmt in ["%d-%b-%Y", "%d-%m-%y", "%d-%m-%Y"]:
+        try:
+            dt = datetime.strptime(date_part, fmt)
+            break
+        except:
+            continue
+
+    if time_part:
+        for tf in ["%H-%M-%S", "%H-%M-%S"]:
+            try:
+                t = datetime.strptime(time_part.strip(), tf)
+                dt = dt.replace(hour=t.hour, minute=t.minute, second=t.second)
+                break
+            except:
+                pass
+    return dt
+```

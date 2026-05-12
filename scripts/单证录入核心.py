@@ -24,7 +24,7 @@ WORKSPACE = Path(__file__).parent.parent.resolve()
 REF_DIR   = WORKSPACE / "references"
 INPUT_DIR = WORKSPACE / "input"
 OUTPUT_DIR = WORKSPACE / "output"
-TEMPLATE_PATH = WORKSPACE / "templates" / "单证录入标准格式.xlsx"
+TEMPLATE_PATH = WORKSPACE / "templates" / "单证录入标准格式_v2.xlsx"
 
 # ── 加载参数映射 ────────────────────────────────────────────────────────────
 def load_refs():
@@ -341,6 +341,209 @@ def assign_duty_fallback(crew_list):
         c["船员职务"] = "55-值班水手"
     for c in engineers[3:]:
         c["船员职务"] = "65-值班机工"
+
+# ── 从Word .doc读取Crew List ────────────────────────────────────────────────
+def read_crew_doc(path):
+    """用 antiword 读取旧版 .doc 文件（Office 97-2003），返回标准化数据列表"""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["antiword", str(path)],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode != 0:
+            print(f"  antiword 读取失败 (exit={result.returncode}): {result.stderr[:200]}")
+            return []
+        text = result.stdout
+    except FileNotFoundError:
+        print("  错误: 未找到 antiword，请安装: brew install antiword")
+        return []
+    except Exception as e:
+        print(f"  antiword 执行错误: {e}")
+        return []
+
+    crew_data = []
+    lines = text.split("\n")
+    # 定位表头行：需包含 NO + PORT + DATE 等关键列
+    header_idx = None
+    headers = []
+    for i, line in enumerate(lines):
+        line_upper = line.upper()
+        if "NO" in line_upper and any(k in line_upper for k in ["PORT", "DATE", "NAME", "RANK"]):
+            header_idx = i
+            # 解析表头（按 | 分割）
+            headers = [h.strip() for h in line.split("|")]
+            break
+
+    if header_idx is None:
+        # 回退：简单按 | 分列，假设第一行为表头
+        header_idx = 0
+        headers = [h.strip() for h in lines[0].split("|") if h.strip()]
+
+    print(f"  antiword 表头行={header_idx+1}: {[h for h in headers if h][:12]}")
+
+    # 建立列索引映射
+    col_map = {}
+    for idx, h in enumerate(headers):
+        hu = h.upper()
+        if "NO" in hu:
+            col_map.setdefault("no", idx)
+        if "NAME" in hu or "FAMILY" in hu or "FIRST" in hu:
+            col_map.setdefault("name", idx)
+        if "RANK" in hu or "RATING" in hu or "RAT" in hu:
+            col_map.setdefault("rank", idx)
+        if "SEX" in hu or "M/F" in hu.upper():
+            col_map.setdefault("sex", idx)
+        if "NATIONAL" in hu or "NATION" in hu or "NATIONALITY" in hu:
+            col_map.setdefault("nation", idx)
+        if "BIRTH" in hu and ("DATE" in hu or "DOB" in hu):
+            col_map.setdefault("birth", idx)
+        if "SEAMAN" in hu or "BOOK" in hu:
+            col_map.setdefault("seaman_book", idx)
+        if "PASSPORT" in hu or "PPT" in hu:
+            col_map.setdefault("passport", idx)
+        if "JOIN" in hu or ("DATE" in hu and "PORT" in hu):
+            col_map.setdefault("join", idx)
+        if "PORT" in hu or "CREW" in hu:
+            col_map.setdefault("port", idx)
+
+    # 解析数据行
+    for i in range(header_idx + 1, len(lines)):
+        line = lines[i].strip()
+        if not line or line.startswith("="):
+            continue
+        cols = [c.strip() for c in line.split("|")]
+        if len(cols) < 3:
+            continue
+
+        def g(j): return cols[j] if j is not None and j < len(cols) else None
+
+        no_val = g(col_map.get("no", 0))
+        name = g(col_map.get("name", 1))
+        rank = g(col_map.get("rank", 2))
+        sex = g(col_map.get("sex", 3))
+        nation = g(col_map.get("nation", 4))
+        birth = g(col_map.get("birth", 5))
+        seaman_combined = g(col_map.get("seaman_book", 6))
+        passport_combined = g(col_map.get("passport", 7))
+        join_combined = g(col_map.get("join", 8))
+        port = g(col_map.get("port", None))
+
+        if not name:
+            continue
+
+        # 序号必须是整数
+        if isinstance(no_val, (int, float)) or (isinstance(no_val, str) and no_val.strip().isdigit()):
+            birth_date, birth_place = _parse_combined_field(birth)
+            seaman_exp, seaman_no = _parse_combined_field(seaman_combined)
+            passport_exp, passport_no = _parse_combined_field(passport_combined)
+            join_date, join_place = _parse_combined_field(join_combined)
+
+            c = {
+                "_raw_name": name,
+                "_raw_sex": sex,
+                "_raw_duty": rank,
+                "_raw_nation": nation,
+                "_raw_birth": birth_date,
+                "_raw_birth_place": birth_place,
+                "_raw_passport": passport_no,
+                "_raw_passport_exp": passport_exp,
+                "_raw_seaman_no": seaman_no,
+                "_raw_seaman_exp": seaman_exp,
+                "_raw_port": port or join_place,
+                "_raw_joindate": join_date,
+            }
+            crew_data.append(c)
+
+    return crew_data
+
+
+# ── 从Word .doc读取Port of Call ─────────────────────────────────────────────
+def read_port_doc(path):
+    """用 antiword 读取旧版 .doc Port of Call 文件"""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["antiword", str(path)],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode != 0:
+            print(f"  antiword 读取失败 (exit={result.returncode}): {result.stderr[:200]}")
+            return []
+        text = result.stdout
+    except FileNotFoundError:
+        print("  错误: 未找到 antiword")
+        return []
+    except Exception as e:
+        print(f"  antiword 执行错误: {e}")
+        return []
+
+    ports_data = []
+    lines = text.split("\n")
+
+    # 定位表头行
+    header_idx = None
+    headers = []
+    for i, line in enumerate(lines):
+        line_upper = line.upper()
+        if "NO" in line_upper and "PORT" in line_upper and any(k in line_upper for k in ["ARRIVAL", "DEPARTURE", "DATE"]):
+            header_idx = i
+            headers = [h.strip() for h in line.split("|")]
+            break
+
+    if header_idx is None:
+        header_idx = 0
+        headers = [h.strip() for h in lines[0].split("|") if h.strip()]
+
+    print(f"  antiword 表头行={header_idx+1}: {[h for h in headers if h][:10]}")
+
+    # 建立列索引映射
+    col_map = {}
+    for idx, h in enumerate(headers):
+        hu = h.upper()
+        if "NO" in hu:
+            col_map.setdefault("no", idx)
+        if "PORT" in hu:
+            col_map.setdefault("port", idx)
+        if "COUNTRY" in hu or "FLAG" in hu:
+            col_map.setdefault("country", idx)
+        if "ARRIVAL" in hu or "ARR" in hu:
+            col_map.setdefault("arrival", idx)
+        if "DEPARTURE" in hu or "DEP" in hu:
+            col_map.setdefault("departure", idx)
+        if "PURPOSE" in hu or "CARGO" in hu:
+            col_map.setdefault("purpose", idx)
+
+    for i in range(header_idx + 1, len(lines)):
+        line = lines[i].strip()
+        if not line or line.startswith("="):
+            continue
+        cols = [c.strip() for c in line.split("|")]
+        if len(cols) < 3:
+            continue
+
+        def g(j): return cols[j] if j is not None and j < len(cols) else None
+
+        no_val = g(col_map.get("no", 0))
+        port = g(col_map.get("port", 1))
+        country = g(col_map.get("country", 2))
+        arrival = g(col_map.get("arrival", None))
+        departure = g(col_map.get("departure", None))
+
+        if not port:
+            continue
+
+        if isinstance(no_val, (int, float)) or (isinstance(no_val, str) and no_val.strip().isdigit()):
+            p = {
+                "_raw_port": port,
+                "_raw_country": country or "",
+                "_raw_arrival": arrival or "",
+                "_raw_departure": departure or "",
+            }
+            ports_data.append(p)
+
+    return ports_data
+
 
 # ── 从Excel读取crew list ──────────────────────────────────────────────────
 def _find_header_row(ws, keywords, require_all=True):
@@ -866,6 +1069,8 @@ def process(crew_path, port_path=None, output_name=None):
         raw_crew = read_crew_excel(crew_path)
     elif crew_path.suffix.lower() == ".pdf":
         raw_crew = read_crew_pdf(crew_path)
+    elif crew_path.suffix.lower() == ".doc":
+        raw_crew = read_crew_doc(crew_path)
     else:
         print(f"❌ 不支持的船员文件格式: {crew_path.suffix}")
         return None
@@ -883,6 +1088,8 @@ def process(crew_path, port_path=None, output_name=None):
                 raw_ports = read_port_excel(port_path)
             elif port_path.suffix.lower() == ".pdf":
                 raw_ports = read_port_pdf(port_path)
+            elif port_path.suffix.lower() == ".doc":
+                raw_ports = read_port_doc(port_path)
             print(f"  → 读取到 {len(raw_ports)} 条港口记录")
             
             # 从第一个港口提取默认登船口岸
