@@ -417,6 +417,7 @@ RED_FILL = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="soli
 | CHANGSHU | 常熟 | CNCGS-CNCGS-常熟(Changshu) | CN |
 | NANSHA | 广州南沙 | CNNSA-CNNSA-广州南沙(Guangzhou Nansha) | CN |
 | MASAN | 马山 | KRMAS-KRMAS-马山(Masan) | KR |
+| SEPETIBA | 伊塔瓜伊/塞佩蒂巴 | **BRSPB**-伊塔瓜伊/塞佩蒂巴(SEPETIBA)（**不是BRSEP**） | BR |
 | PORTOCEL | 蓬塔塞CEL | BRPCE-BRPCE-蓬塔塞CEL(Portocel) | BR |
 | PARANAGUA | 巴拉那瓜 | BRPNG-BRPNG-巴拉那瓜(Paranagua) | BR |
 | VITORIA | 维多利亚 | BRVIX-BRVIX-维多利亚(Vitoria) | BR |
@@ -424,7 +425,7 @@ RED_FILL = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="soli
 | PORT WALCOTT | 沃尔科特港 | AUPWA-沃尔科特港(PORT WALCOTT) | AU |
 | MA JISHAN | 马迹山 | CNMJS（port_map无，手动） | CN |
 | LONGKOU | 龙口 | CNLKU-龙口 | CN |
-| NINGBO | 宁波 | CNNBO-CNNBO-宁波(Ningbo)（**非 CNNGB**，后者不存在） | CN |
+| NINGBO | 宁波 | CNNBO-CNNBO-宁波(Ningbo)（**已废弃**） | CN |
 | SONGXIA | 松下 | CNSON-CNSON-松下(Songxia) | CN |
 | LANSHAN | 岚山 | CNLSN-岚山１ | CN |
 
