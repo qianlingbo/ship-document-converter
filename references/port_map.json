@@ -327,6 +327,7 @@
   "TTPTS": "TTPTS-利萨斯角(Point Lisas)",
   "AEJEA": "AEJEA-阿里山(Jebel Ali)",
   "IDANY": "IDANY-安雅尔(ANYER)",
+  "IDBAH": "IDBAH-巴霍多皮(BAHODOPI)",
   "AESHJ": "AESHJ-舍尔杰/沙迦(Sharjah)",
   "TQUQR": "TQUQR-务姆盖斯尔(UMM QASR)",
   "AEKLF": "AEKLF-豪尔费坎(Khor Fakkan/ Khor al Fakkan)",
@@ -1599,7 +1600,7 @@
   "VNVUT": "VNVUT-头顿(Vung Tau)",
   "USLOG": "USLOG-朗维尤(longview)",
   "JPIMI": "JPIMI-IMARI",
-  "BRSPB": "BRSPB-伊塔瓜伊",
+  "BRSPB": "BRSPB-伊塔瓜伊/塞佩蒂巴(SEPETIBA)",
   "USABR": "USABR-阿伯丁",
   "CNTNJ": "CNTNJ-天津港",
   "AUQDN": "AUQDN-埃登",
@@ -1956,5 +1957,7 @@
   "TRGEM": "TRGEM-盖姆利克(Gemlik)",
   "VNCMT": "VNCMT-蔡美普国际码头(Vncmt)",
   "IDWED": "IDWED-WEDA",
-  "CNCIG": "CNCIG-陈家港(CHENJIAGANG)"
+  "CNCIG": "CNCIG-陈家港(CHENJIAGANG)",
+  "MYTRB": "MYTRB-直落鲁比亚(TELUK RUBIAH)",
+  "GNBFA": "GNBFA-博法(BOFFA)"
 }

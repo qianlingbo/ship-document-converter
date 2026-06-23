@@ -207,6 +207,7 @@ def match_port(val):
 
 以下港口在 `port_map.json` 中不存在（测试于 UNIVERSE HARMONY / IMO 9222546 的 LAST TEN PORT），手动映射已验证可用：
 
+| SEPETIBA | 伊塔瓜伊/塞佩蒂巴 | **BRSPB**-伊塔瓜伊(Itaguai) | BR |
 | 原始港口名 | 替代港口 | 替代代码 | 国家 |
 |------------|----------|----------|------|
 | OPEN SEA | 公海 | THS-公海 | UN |
@@ -215,6 +216,7 @@ def match_port(val):
 | MORMUGAO | 哈迪亚 | INHDA-哈迪亚(HALDIA) | IN |
 | GO DAU | 岘港 | VNDAD-岘港(Da-Nang/ Da Nang) | VN |
 | LEAMCHABANG | 林查班 | THLCH-林查班(Laem Chabang) | TH |
+| BINHAI | 滨海 | CNBHI-滨海(BINHAI) | CN |
 
 ## 12. RED FILL 颜色格式（openpyxl 坑点）
 

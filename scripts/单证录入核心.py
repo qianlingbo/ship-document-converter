@@ -34,9 +34,11 @@ def load_refs():
         duty_list = list(json.load(f).keys())
     with open(REF_DIR / "port_map.json", encoding="utf-8") as f:
         port_map = json.load(f)
-    return nat_map, duty_list, port_map
+    with open(REF_DIR / "poc-country-map.json", encoding="utf-8") as f:
+        poc_country_map = json.load(f)
+    return nat_map, duty_list, port_map, poc_country_map
 
-NATIONALITY_MAP, DUTY_LIST, PORT_MAP = load_refs()
+NATIONALITY_MAP, DUTY_LIST, PORT_MAP, POC_COUNTRY_MAP = load_refs()
 
 # ── 工具函数 ────────────────────────────────────────────────────────────────
 
@@ -111,18 +113,50 @@ def normalize_code(val, mapping):
 
     return None
 
+# 常用港口 fallback（port_map.json 缺失的，手动补全）
+PORT_FALLBACK = {
+    # 国家-港口名 → 参数E完整字符串
+    "HONGKONG": "HKHKG-香港(Hong Kong)",
+    "香港": "HKHKG-香港(Hong Kong)",
+    "QINGDAO": "CNQDP-青岛港",
+    "青岛": "CNQDP-青岛港",
+    "DONGGUAN": "CNGGU-东莞",
+    "东莞": "CNGGU-东莞",
+    "SHENZHEN": "SZX-深圳宝安国际机场(Shenzhenbaoanguojijichang)",
+    "深圳": "SZX-深圳宝安国际机场(Shenzhenbaoanguojijichang)",
+    "XIAMEN": "CNXAM-厦门",
+    "厦门": "CNXAM-厦门",
+    "WEIFANG": "CNWEF-潍坊(Weifang)",
+    "潍坊": "CNWEF-潍坊(Weifang)",
+    "QINGDAO": "CNQDP-青岛港",
+    "青岛": "CNQDP-青岛港",
+    "LAEMCHABANG": "THLCH-林查班(Laem Chabang)",
+    "SIHANOUK VILLE": "KHKOS-西哈努克城(Sihanoukville)",
+    "西哈努克": "KHKOS-西哈努克城(Sihanoukville)",
+    "CEBU": "PHCEB-宿务(Cebu)",
+    "宿务": "PHCEB-宿务(Cebu)",
+}
+
 def match_port(val):
     """匹配港口：输入值 → 参数E列完整字符串"""
     if not val:
         return None
-    v = str(val).strip().upper()
+    v = str(val).strip()
+
+    # 0. PORT_FALLBACK 优先查
+    vu = v.upper()
+    if vu in PORT_FALLBACK:
+        return PORT_FALLBACK[vu]
+    for key, full in PORT_FALLBACK.items():
+        if key.upper() in vu or vu in key.upper():
+            return full
 
     # 1. 标准匹配
     for code, full in PORT_MAP.items():
-        if v == code.upper() or v == full.upper() or v == full.split("-")[0].upper():
+        if vu == code.upper() or vu == full.upper() or vu == full.split("-")[0].upper():
             return full
     for code, full in PORT_MAP.items():
-        if v in full.upper() or full.upper().replace(" ", "") in v.replace(" ", ""):
+        if vu in full.upper() or full.upper().replace(" ", "") in vu.replace(" ", ""):
             return full
 
     # 2. 拆分组合字符串，如 "LIANYUNGANG, CHINA" → 取第一段匹配
@@ -131,7 +165,7 @@ def match_port(val):
         for part in parts:
             if len(part) > 3:  # 排除 CHINA 等太短的国家名
                 for code, full in PORT_MAP.items():
-                    if part == code.upper() or part in full.upper() or full.upper() in part:
+                    if part.upper() == code.upper() or part.upper() in full.upper() or full.upper() in part.upper():
                         return full
                     # 部分匹配：LIANYUNGANG → 连云港（要求 ≥6 字符防误匹配）
                     if (len(part) >= 6 and part[:6] in full.upper()) or \
@@ -578,8 +612,121 @@ def _parse_combined_field(val):
         return m.group(1).strip(), m.group(2).strip()
     return s, None
 
+def _read_crew_xls(path):
+    """用 xlrd 读取旧版 .xls Crew List"""
+    import xlrd
+    wb = xlrd.open_workbook(path)
+    ws = wb.sheet_by_index(0)
+
+    # 扫描定位表头行
+    header_idx = None
+    headers = []
+    for i in range(min(20, ws.nrows)):
+        row = [str(c.value).strip() if c.value else "" for c in ws.row(i)]
+        if any("NO." in h.upper() for h in row) and any("NAME" in h.upper() or "FAMILY" in h.upper() for h in row):
+            header_idx = i
+            headers = row
+            break
+    if header_idx is None:
+        header_idx = 0
+        headers = [str(c.value).strip() if c.value else "" for c in ws.row(0)]
+
+    # 构建列名→索引映射
+    col_map = {}
+    for idx, h in enumerate(headers):
+        hu = h.upper()
+        if "NO" in hu:
+            col_map.setdefault("no", idx)
+        if "NAME" in hu or "FAMILY" in hu:
+            col_map.setdefault("name", idx)
+        if "RANK" in hu or "RATING" in hu:
+            col_map.setdefault("rank", idx)
+        if "SEX" in hu:
+            col_map.setdefault("sex", idx)
+        if "NATIONAL" in hu:
+            col_map.setdefault("nation", idx)
+        if "BIRTH" in hu:
+            col_map.setdefault("birth", idx)
+        if "SEAMAN" in hu or "BOOK" in hu:
+            col_map.setdefault("seaman_book", idx)
+        if "PASSPORT" in hu:
+            col_map.setdefault("passport", idx)
+        if "JOIN" in hu:
+            col_map.setdefault("join", idx)
+
+    crew_data = []
+    for i in range(header_idx + 1, ws.nrows):
+        row = ws.row(i)
+        def g(j): return row[j].value if j < len(row) else None
+
+        no_val = g(col_map.get("no", 0))
+        name = g(col_map.get("name", 1))
+        rank = g(col_map.get("rank", 2))
+        sex = g(col_map.get("sex", 3))
+        nation = g(col_map.get("nation", 4))
+
+        # 该文件实际列布局（header row=col4，表头行index=4，数据从Row6开始）：
+        # col6=出生日期(float Excel serial), col7=出生地点, col8=海员证号
+        # col10=护照号, col12=登船地点, col13=登船日期(字符串 YYYY/MM/DD)
+        # col_map 在此文件中：birth=6, seaman_book=8, passport=10, join=12
+        birth_combined = g(col_map.get("birth", 6))   # Excel float serial date
+        birth_place    = g(7)                          # plain string
+        seaman_no      = g(col_map.get("seaman_book", 8))  # plain string
+        passport_no    = g(col_map.get("passport", 10))     # plain string
+        join_place     = g(12)                          # plain string
+        join_date_raw  = g(13)                          # string YYYY/MM/DD
+
+        if not name:
+            continue
+        if isinstance(no_val, (int, float)) or (isinstance(no_val, str) and no_val.strip().isdigit()):
+            # 出生日期：Excel float serial → YYYYMMDD
+            def xlrd_serial_to_date(v):
+                if isinstance(v, float):
+                    try:
+                        dt = xlrd.xldate_as_datetime(v, wb.datemode)
+                        return dt.strftime("%Y%m%d")
+                    except:
+                        return str(int(v))
+                return str(v) if v else ""
+
+            # 登船日期：字符串 YYYY/MM/DD → YYYYMMDD
+            def str_to_ymd(v):
+                if not v:
+                    return None
+                s = str(v).strip()
+                if not s:
+                    return None
+                from datetime import datetime
+                for fmt in ["%Y/%m/%d", "%Y-%m-%d", "%d/%m/%Y"]:
+                    try:
+                        return datetime.strptime(s, fmt).strftime("%Y%m%d")
+                    except:
+                        pass
+                return s  # fallback：保留原样
+
+            c = {
+                "_raw_name": str(name),
+                "_raw_sex": str(sex) if sex else "",
+                "_raw_duty": str(rank) if rank else "",
+                "_raw_nation": str(nation) if nation else "",
+                "_raw_birth": xlrd_serial_to_date(birth_combined),
+                "_raw_birth_place": str(birth_place) if birth_place else "",
+                "_raw_passport": str(passport_no) if passport_no else "",
+                "_raw_passport_exp": "",
+                "_raw_seaman_no": str(seaman_no) if seaman_no else "",
+                "_raw_seaman_exp": "",
+                "_raw_port": str(join_place) if join_place else "",
+                "_raw_joindate": str_to_ymd(join_date_raw),
+            }
+            crew_data.append(c)
+
+    return crew_data
+
 def read_crew_excel(path):
     """读取任意格式的crew list Excel，返回标准化数据列表"""
+    suffix = Path(path).suffix.lower()
+    if suffix == ".xls":
+        return _read_crew_xls(path)
     wb = openpyxl.load_workbook(path, data_only=True)
     ws = wb.active
 
@@ -707,6 +854,9 @@ def read_crew_pdf(path):
 # ── 从Excel读取port of call ───────────────────────────────────────────────
 def read_port_excel(path):
     """读取 port of call Excel"""
+    suffix = Path(path).suffix.lower()
+    if suffix == ".xls":
+        return _read_port_xls(path)
     wb = openpyxl.load_workbook(path, data_only=True)
     ws = wb.active
 
@@ -746,6 +896,74 @@ def read_port_excel(path):
         }
         ports_data.append(p)
 
+    return ports_data
+
+def _read_port_xls(path):
+    """用 xlrd 读取旧版 .xls Port of Call"""
+    import xlrd
+    wb = xlrd.open_workbook(path)
+    # 尝试找 "PORT OF CALL LIST" sheet，否则用第0个
+    try:
+        ws = wb.sheet_by_name("PORT OF CALL LIST")
+    except:
+        ws = wb.sheet_by_index(0)
+
+    # 扫描表头行（跳过前面的标题行）
+    # 找同时含 "No." 列 + "Name of port" 列的那一行
+    header_idx = None
+    headers = []
+    for i in range(min(20, ws.nrows)):
+        row_vals = [c.value for c in ws.row(i)]
+        row_strs = [str(v).strip().upper() if v else "" for v in row_vals]
+        # 精确匹配表头关键词，排除 "Voyage No." 这类误匹配
+        has_no = any("NO." in s and ("NAME" in s or "PORT" in s or "COUNTRY" in s or "ARRIV" in s or "DEPART" in s or "SECURIT" in s or "DATE" in s) for s in row_strs)
+        has_port = any(("NAME OF PORT" in s or "PORT OF CALL" in s) for s in row_strs)
+        if has_no and has_port:
+            header_idx = i
+            headers = row_strs
+            break
+    if header_idx is None:
+        header_idx = 4  # fallback：固定从第5行开始（船名行后）
+        headers = [str(c.value).strip() if c.value else "" for c in ws.row(header_idx)]
+
+    def xlrd_date(v):
+        # 处理 Excel 日期浮点数
+        if isinstance(v, float):
+            try:
+                dt = xlrd.xldate_as_datetime(v, wb.datemode)
+                return dt.strftime("%Y/%m/%d")
+            except:
+                return str(v)
+        # 处理字符串格式如 "2026.05.21" 或 "2026/05/21"
+        s = str(v).strip()
+        if not s:
+            return ""
+        for fmt in ["%Y.%m.%d", "%Y/%m/%d", "%d/%m/%y", "%d/%m/%Y"]:
+            try:
+                return datetime.strptime(s, fmt).strftime("%Y/%m/%d")
+            except:
+                pass
+        return s
+
+    ports_data = []
+    for i in range(header_idx + 1, ws.nrows):
+        row = ws.row(i)
+        def g(j): return row[j].value if j < len(row) else None
+        port = g(1)  # Name of port
+        country = g(2)  # Country
+        unloc = g(3)  # UNLOCODE
+        arrival = g(4)  # arrival date
+        departure = g(5)  # departure date
+        if not port:
+            continue
+        p = {
+            "_raw_port": str(port).strip(),
+            "_raw_country": str(country).strip() if country else "",
+            "_raw_unloc": str(unloc).strip() if unloc else "",
+            "_raw_arrival": xlrd_date(arrival),
+            "_raw_departure": xlrd_date(departure),
+        }
+        ports_data.append(p)
     return ports_data
 
 # ── 从PDF读取port of call ──────────────────────────────────────────────────
@@ -917,9 +1135,14 @@ def normalize_ports(raw_list):
             if port_mapped:
                 _port_fallback = True
         
-        # 国家/地区
+        # 国家/地区：优先用 POC_COUNTRY_MAP，再用 NATIONALITY_MAP
+        country_mapped = None
         if country_raw:
-            country_mapped = normalize_code(country_raw, NATIONALITY_MAP)
+            vu = country_raw.strip().upper()
+            # 先查 POC_COUNTRY_MAP
+            country_mapped = POC_COUNTRY_MAP.get(vu)
+            if not country_mapped:
+                country_mapped = normalize_code(country_raw, NATIONALITY_MAP)
         else:
             country_mapped = get_country_name_for_port(port_raw)
         
